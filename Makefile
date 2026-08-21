@@ -8,6 +8,7 @@ OBJS = \
   $K/printk.o \
   $K/uart.o \
   $K/kalloc.o \
+  $K/event.o \
   $K/spinlock.o \
   $K/string.o \
   $K/main.o \
@@ -146,6 +147,8 @@ UPROGS=\
 	$U/_forphan\
 	$U/_dorphan\
 	$U/_sync\
+	$U/_blackbox\
+	$U/_eventtest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

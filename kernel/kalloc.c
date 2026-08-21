@@ -8,6 +8,7 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "defs.h"
+#include "event.h"
 
 void freerange(void *pa_start, void *pa_end);
 
@@ -56,6 +57,13 @@ kfree(void *pa)
 
   r = (struct run *)pa;
 
+  // Black box: record OUTSIDE kmem.lock.  Two reasons: (1) it keeps the
+  // allocator's critical section as short as it was before, and (2) it
+  // avoids nesting elog.lock inside kmem.lock at all, so no lock-order
+  // question can even arise.  Disabled by default in EVMASK_DEFAULT
+  // because this path is far too hot for a 256-entry ring.
+  eventcur(EV_FREE, PGSIZE, (uint64)pa);
+
   acquire(&kmem.lock);
   r->next = kmem.freelist;
   kmem.freelist = r;
@@ -78,5 +86,10 @@ kalloc(void)
 
   if (r)
     memset((char *)r, 5, PGSIZE); // fill with junk
+
+  // Black box: again outside kmem.lock, and only for successful allocations.
+  if (r)
+    eventcur(EV_ALLOC, PGSIZE, (uint64)r);
+
   return (void *)r;
 }
