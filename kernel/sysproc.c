@@ -113,14 +113,10 @@ sys_uptime(void)
 
 // int getevents(struct kernel_event *buf, int max)
 //
-// Copy up to 'max' recorded kernel events, oldest first, into the user
-// buffer.  Returns the number of events copied (0 if the log is empty),
-// or -1 on a bad argument or an unwritable user buffer.
-//
-// Note what we do NOT do: we never hand a kernel pointer to user space and
-// we never let user space see the ring itself.  Everything crosses the
-// boundary through copyout(), which validates the destination against the
-// caller's page table.
+// Copy up to 'max' events, oldest first, into the user buffer.  Returns the
+// number copied, or -1 on a bad argument or address.  User space never sees
+// the ring itself: everything crosses through copyout(), which validates the
+// destination against the caller's page table.
 uint64
 sys_getevents(void)
 {
@@ -138,9 +134,8 @@ sys_getevents(void)
 
 // int eventctl(int mask)
 //
-// mask <  0 : return the current event-type mask, change nothing.
-// mask >= 0 : install 'mask' as the set of event types to record and empty
-//             the ring.  Returns the previous mask.
+// mask <  0 : query the current event-type mask, change nothing.
+// mask >= 0 : install it and empty the ring.  Returns the previous mask.
 uint64
 sys_eventctl(void)
 {

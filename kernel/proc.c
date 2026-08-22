@@ -302,8 +302,7 @@ kfork(void)
   np->state = RUNNABLE;
   release(&np->lock);
 
-  // Black box: the child now exists and is runnable, and we hold no locks,
-  // so this is the cheapest safe place to record the event.
+  // Black box: the child is runnable and we hold no locks.
   eventrecord(EV_FORK, p->pid, pid, 0);
 
   return pid;
@@ -335,8 +334,7 @@ kexit(int status)
   if (p == initproc)
     panic("init exiting");
 
-  // Black box: record before we start tearing the process down, while no
-  // locks are held and p->pid is still valid.
+  // Black box: record before teardown, while p->pid is still valid.
   eventrecord(EV_EXIT, p->pid, status, 0);
 
   // Close all open files.
@@ -460,13 +458,11 @@ scheduler(void)
         p->state = RUNNING;
         c->proc = p;
 
-        // Black box: record the scheduling decision *before* swtch(), while
-        // this hart still owns p->lock and p is guaranteed not to disappear.
-        // Safe because elog.lock is a leaf lock: the recorder never acquires
-        // any other lock, so the order p->lock -> elog.lock can never form a
-        // cycle.  acquire()/release() are balanced here, so mycpu()->noff is
-        // back to 1 by the time swtch() runs and sched()'s "sched locks"
-        // assertion still holds for the process we switch to.
+        // Black box: record before swtch(), while this hart still owns
+        // p->lock so p cannot disappear.  Safe because elog.lock is a leaf
+        // lock, so p->lock -> elog.lock cannot form a cycle, and because
+        // acquire()/release() balance here, leaving noff back at 1 for
+        // sched()'s "sched locks" assertion.
         eventrecord(EV_SCHED, p->pid, 0, 0);
 
         swtch(&c->context, &p->context);

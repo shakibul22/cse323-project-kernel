@@ -130,9 +130,8 @@ kexec(char *path, char **argv)
       last = s + 1;
   safestrcpy(p->name, last, sizeof(p->name));
 
-  // Black box: pack the first 16 bytes of the program name into arg1/arg2
-  // so the user-space tool can print it.  p->name is a fixed 16-byte array,
-  // so this is two aligned loads -- no string processing in the hot path.
+  // Black box: p->name is a fixed 16-byte array, so packing it into
+  // arg1/arg2 is two aligned loads instead of string work on a hot path.
   uint64 nm1, nm2;
   memmove(&nm1, &p->name[0], sizeof(nm1));
   memmove(&nm2, &p->name[8], sizeof(nm2));

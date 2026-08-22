@@ -10,9 +10,9 @@
 //                            or "all" / "none" / "default".
 //   blackbox -s              show the current recording mask and exit
 //
-// All formatting happens here, in user space.  The kernel stores only fixed
-// -size binary records; turning a number into "SYSCALL write" is exactly the
-// kind of work that must not happen on a kernel fast path.
+// All formatting happens here.  The kernel stores fixed-size binary records
+// only; turning a number into "SYSCALL write" must not happen on a kernel
+// fast path.
 //
 #include "kernel/types.h"
 #include "kernel/stat.h"
@@ -20,8 +20,7 @@
 #include "kernel/syscall.h"
 #include "user/user.h"
 
-// One buffer big enough for the whole ring.  It is a global, so it lives in
-// BSS rather than on the one-page user stack.
+// Global, so the whole ring fits in BSS rather than the one-page stack.
 static struct kernel_event evbuf[EVENT_BUFFER_SIZE];
 
 static const char *typename[EV_NTYPES] = {
@@ -30,7 +29,7 @@ static const char *typename[EV_NTYPES] = {
   [EV_FREE]    "FREE",    [EV_SCHED] "SCHEDULE",
 };
 
-// Syscall number -> name.  Kept in user space on purpose (see header above).
+// Syscall number -> name.
 static const char *syscallname[] = {
   [SYS_fork] "fork",     [SYS_exit] "exit",     [SYS_wait] "wait",
   [SYS_pipe] "pipe",     [SYS_read] "read",     [SYS_kill] "kill",
@@ -44,10 +43,8 @@ static const char *syscallname[] = {
 };
 #define NSYSCALLNAME (sizeof(syscallname) / sizeof(syscallname[0]))
 
-// xv6's printf understands no width or alignment flags ("%-8s" prints
-// literally), so the column layout is done by hand.
-
-// Print s, then spaces, until w columns have been used.
+// xv6's printf has no width or alignment flags ("%-8s" prints literally),
+// so the columns are padded by hand.
 static void
 padstr(const char *s, int w)
 {
@@ -62,7 +59,6 @@ padstr(const char *s, int w)
   }
 }
 
-// Right-align an unsigned number in w columns.
 static void
 padnum(uint64 v, int w)
 {
@@ -80,7 +76,7 @@ padnum(uint64 v, int w)
   printf("%ld", v);
 }
 
-// Print the 16 bytes packed into arg1/arg2 by the EXEC hook as a string.
+// Unpack the 16 name bytes the EXEC hook packed into arg1/arg2.
 static void
 printname(uint64 a1, uint64 a2)
 {
@@ -94,7 +90,6 @@ printname(uint64 a1, uint64 a2)
     printf("%c", nm[i]);
 }
 
-// Returns 1 if this event type carries any detail text at all.
 static int
 hasdetails(struct kernel_event *e)
 {
@@ -129,8 +124,7 @@ describe(struct kernel_event *e)
   }
 }
 
-// Parse "fork,exit,alloc" / "all" / "none" / "default" into a mask.
-// Returns -1 if a name is not recognised.
+// Parse "fork,exit,alloc" / "all" / "none" / "default".  -1 if unknown.
 static int
 parsemask(char *s)
 {
@@ -161,7 +155,6 @@ parsemask(char *s)
         found = 1;
         break;
       }
-      // case-insensitive compare against the lower-case spelling
       {
         char up[16];
         int k;
@@ -269,8 +262,7 @@ main(int argc, char *argv[])
   for (i = 0; i < n; i++) {
     struct kernel_event *e = &evbuf[i];
 
-    // A jump in seq means events were overwritten between two of our
-    // chunked copies, or simply that the ring wrapped before we read it.
+    // A jump in seq means the ring wrapped before we read it.
     if (i > 0 && e->seq != lastseq + 1)
       gaps++;
     lastseq = e->seq;

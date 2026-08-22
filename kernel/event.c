@@ -1,19 +1,14 @@
 //
-// Kernel Event Recorder ("black box").
+// Kernel event recorder ("black box").
 //
-// A fixed-size circular buffer of struct kernel_event living in kernel BSS.
-// Kernel code calls eventrecord() from a handful of instrumentation points
-// (fork, exit, exec, the syscall dispatcher, the page allocator and the
-// scheduler).  User space reads the buffer with the getevents() system call.
+// A fixed-size circular buffer of struct kernel_event in kernel BSS,
+// written by instrumentation points in fork, exit, exec, the syscall
+// dispatcher, the page allocator and the scheduler, and read by user
+// space through getevents().
 //
-// Design rules obeyed by every line of this file:
-//   1. Never allocate memory.        (would recurse into the ALLOC hook)
-//   2. Never print.                  (console lock + slow)
-//   3. Never sleep, never take any other lock while holding elog.lock,
-//      i.e. elog.lock is a LEAF lock -- this is what makes the recorder
-//      deadlock-free no matter which kernel path calls it.
-//   4. Never copyout() while holding elog.lock (copyout can fault, and
-//      handling that fault calls kalloc(), which calls back into us).
+// elog.lock is a LEAF lock: this file never allocates, never prints,
+// never sleeps and never takes another lock while holding it, so the
+// recorder cannot deadlock whatever kernel path calls it.
 //
 #include "types.h"
 #include "param.h"
@@ -24,22 +19,20 @@
 #include "defs.h"
 #include "event.h"
 
-// The whole recorder.  Statically allocated: 256 * 40 = 10240 bytes.
-// It never grows.
+// The whole recorder: 256 * 40 = 10240 bytes, statically allocated.
 struct {
   struct spinlock lock;
   struct kernel_event buf[EVENT_BUFFER_SIZE];
-  uint   head;  // index of the slot the NEXT event goes into
-  uint   count; // number of valid events, 0 .. EVENT_BUFFER_SIZE
-  uint64 nrec;  // total events ever recorded (source of e->seq)
-  uint64 nlost; // events overwritten (i.e. lost) because the ring was full
-  int    mask;  // bit i set => record events of type i
-  int    ready; // 0 until eventinit() has run
+  uint   head;  // slot the next event goes into
+  uint   count; // valid events, 0 .. EVENT_BUFFER_SIZE
+  uint64 nrec;  // total ever recorded; source of e->seq
+  uint64 nlost; // events overwritten because the ring was full
+  int    mask;  // bit i set => record type i
+  int    ready;
 } elog;
 
-// Called once from main() on hart 0, AFTER kinit().  Recording is off until
-// this returns, which conveniently drops the ~32000 kfree() calls that
-// kinit()'s freerange() performs while building the free list.
+// Called from main() on hart 0 after kinit(), so the ~32000 kfree() calls
+// that freerange() makes while building the free list are not recorded.
 void
 eventinit(void)
 {
@@ -53,12 +46,9 @@ eventinit(void)
   elog.ready = 1;
 }
 
-// Record one event.  'pid' is passed in by the caller rather than read from
-// myproc() because some call sites (the scheduler) know the pid they care
-// about while myproc() would return 0 there.
-//
-// This is the hot path: no loops, no strings, no allocation, and the
-// critical section is a dozen stores long.
+// Record one event.  The caller passes 'pid' rather than letting us read
+// myproc(), because the scheduler knows the pid it cares about while
+// myproc() would return 0 there.
 void
 eventrecord(int type, int pid, uint64 arg1, uint64 arg2)
 {
@@ -69,8 +59,8 @@ eventrecord(int type, int pid, uint64 arg1, uint64 arg2)
   if (type <= EV_NONE || type >= EV_NTYPES)
     return;
   // Racy read of elog.mask: worst case we record one event that was just
-  // disabled, or miss one that was just enabled.  Taking the lock for the
-  // common "type is disabled" case would cost far more than it is worth.
+  // disabled, or miss one that was just enabled.  Locking for the common
+  // "type is disabled" case would cost more than it is worth.
   if ((elog.mask & EVMASK(type)) == 0)
     return;
 
@@ -78,10 +68,9 @@ eventrecord(int type, int pid, uint64 arg1, uint64 arg2)
 
   e = &elog.buf[elog.head];
   e->seq = elog.nrec++;
-  // 'ticks' is read without tickslock on purpose.  Taking tickslock here
-  // would nest the recorder inside the timer path; a 4-byte aligned load of
-  // a monotonically increasing counter is a benign race whose worst outcome
-  // is a timestamp that is one tick stale.
+  // 'ticks' is read without tickslock on purpose: taking it here would nest
+  // the recorder inside the timer path, and the worst outcome of the race
+  // is a timestamp one tick stale.
   e->ticks = ticks;
   e->pid = pid;
   e->cpu = cpuid(); // legal: acquire() turned interrupts off
@@ -89,9 +78,8 @@ eventrecord(int type, int pid, uint64 arg1, uint64 arg2)
   e->arg1 = arg1;
   e->arg2 = arg2;
 
-  // Circular buffer advance.  EVENT_BUFFER_SIZE is a power of two, so the
-  // wrap is a mask.  When the ring is full, head simply runs over the oldest
-  // record: the count stays pinned at EVENT_BUFFER_SIZE and we bump nlost.
+  // When the ring is full head runs over the oldest record: count stays
+  // pinned and nlost goes up.
   elog.head = (elog.head + 1) & EVENT_BUFFER_MASK;
   if (elog.count < EVENT_BUFFER_SIZE)
     elog.count++;
@@ -101,8 +89,8 @@ eventrecord(int type, int pid, uint64 arg1, uint64 arg2)
   release(&elog.lock);
 }
 
-// Convenience wrapper for call sites that just want "the current process".
-// myproc() returns 0 in scheduler/boot context, which we report as pid 0.
+// For call sites that just mean "the current process".  myproc() is 0 in
+// scheduler/boot context, which we report as pid 0.
 void
 eventcur(int type, uint64 arg1, uint64 arg2)
 {
@@ -110,15 +98,13 @@ eventcur(int type, uint64 arg1, uint64 arg2)
   eventrecord(type, p ? p->pid : 0, arg1, arg2);
 }
 
-// Number of events staged on the kernel stack per copyout().
-// 8 * 40 = 320 bytes; the kernel stack is only one page, so keep this small.
+// Events staged on the kernel stack per copyout().  8 * 40 = 320 bytes;
+// the kernel stack is one page, so keep this small.
 #define EVCHUNK 8
 
-// Implementation of the getevents() system call.
-// Copies at most 'max' events, oldest first, to the user buffer at dstva.
-// The caller must supply room for 'max' events -- that is the interface
-// contract, and it is what lets us validate the buffer before we touch it.
-// Returns the number of events copied, or -1 on a bad argument/address.
+// getevents(): copy at most 'max' events, oldest first, to dstva.  The
+// caller must supply room for 'max' events.  Returns the number copied,
+// or -1 on a bad argument or address.
 int
 eventread(uint64 dstva, int max)
 {
@@ -131,11 +117,9 @@ eventread(uint64 dstva, int max)
   if (max < 0)
     return -1;
 
-  // Validate the user buffer up front, before deciding how much to copy.
-  // Doing it here (rather than relying on copyout to fail later) means a
-  // bogus pointer is rejected even when the log happens to be empty, and it
-  // means we never copy a partial result into a buffer that was too small.
-  // The first test also catches an address+length overflow.
+  // Validate the buffer before deciding how much to copy, so a bogus
+  // pointer is rejected even when the log is empty.  The first test also
+  // catches an address+length overflow.
   need = (uint64)max * sizeof(struct kernel_event);
   if (dstva + need < dstva || dstva + need > p->sz)
     return -1;
@@ -145,8 +129,7 @@ eventread(uint64 dstva, int max)
   if (!elog.ready)
     return 0;
 
-  // Snapshot how many events we are going to return, and where the oldest
-  // one lives.  start = head - n, modulo the ring size.
+  // Snapshot how much we return and where the oldest event lives.
   acquire(&elog.lock);
   n = elog.count;
   if (n > max)
@@ -154,12 +137,11 @@ eventread(uint64 dstva, int max)
   start = (elog.head + EVENT_BUFFER_SIZE - n) & EVENT_BUFFER_MASK;
   release(&elog.lock);
 
-  // Copy in small chunks.  We must NOT hold elog.lock across copyout():
-  // copyout() may hit an unmapped lazily-allocated user page, which calls
-  // vmfault() -> kalloc() -> eventrecord() -> acquire(&elog.lock) on this
-  // same hart, and xv6 spinlocks are not recursive: that would panic with
-  // "acquire".  So we stage a few records under the lock, drop the lock,
-  // and only then touch user memory.
+  // We must not hold elog.lock across copyout(): copyout() can fault on a
+  // lazily-allocated user page, and that fault runs kalloc() ->
+  // eventrecord() -> acquire(&elog.lock) on this same hart.  xv6 spinlocks
+  // are not recursive, so that would panic.  Stage a few records under the
+  // lock, drop it, then touch user memory.
   while (copied < n) {
     k = n - copied;
     if (k > EVCHUNK)
@@ -181,10 +163,8 @@ eventread(uint64 dstva, int max)
   return copied;
 }
 
-// Implementation of the eventctl() system call.
-//   newmask <  0 : query only, nothing changes.
-//   newmask >= 0 : install the new type mask AND empty the ring.
-// Returns the mask that was in effect before the call.
+// eventctl(): newmask < 0 queries; newmask >= 0 installs the new type mask
+// and empties the ring.  Returns the previous mask.
 int
 eventctl(int newmask)
 {

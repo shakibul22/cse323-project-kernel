@@ -139,14 +139,9 @@ static uint64 (*syscalls[])(void) = {
 };
 
 // Which system calls the black box records.  Bit n set => trace call n.
-//
-// We deliberately do NOT trace every call:
-//   - getpid/uptime are cheap pollers that user programs call in tight loops;
-//   - getevents/eventctl belong to the recorder itself, and tracing them
-//     would mean every attempt to *read* the log first *writes* to it,
-//     i.e. the observer would erase what it came to observe.
-// Everything else is traced.  Editing this one constant is all it takes to
-// widen or narrow syscall tracing.
+// getpid/uptime are polled in tight loops, and tracing the recorder's own
+// calls would mean every read of the log first wrote to it -- the observer
+// would erase what it came to observe.
 #define SYSCALL_TRACE_MASK                                                    \
   (~((1u << SYS_getpid) | (1u << SYS_uptime) | (1u << SYS_getevents) |        \
      (1u << SYS_eventctl)))
@@ -159,9 +154,8 @@ syscall(void)
 
   num = p->trapframe->a7;
   if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
-    // Black box: one instrumentation point covers all system calls, instead
-    // of touching each sys_*() individually.  Recorded before the handler
-    // runs, so a call that never returns (exit) is still logged.
+    // Black box: one point covers every system call.  Recorded before the
+    // handler runs, so a call that never returns (exit) is still logged.
     if (num < 32 && (SYSCALL_TRACE_MASK & (1u << num)))
       eventrecord(EV_SYSCALL, p->pid, num, 0);
 

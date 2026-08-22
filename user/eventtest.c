@@ -4,10 +4,9 @@
 //   eventtest          run every test
 //   eventtest N        run only test N (1..8)
 //
-// Each test first calls eventctl() with a narrow event mask.  That both
-// clears the ring and silences the event types the test does not care
-// about, so the test's own printf()s (which are write() syscalls) cannot
-// drown the events being counted.
+// Each test starts with eventctl() and a narrow mask.  That clears the ring
+// and silences types the test does not care about, so the test's own
+// printf()s -- which are write() syscalls -- cannot drown what it counts.
 //
 #include "kernel/types.h"
 #include "kernel/stat.h"
@@ -138,8 +137,7 @@ test4(void)
   ok("pause recorded", sawpause);
   ok("fork recorded", sawfork);
 
-  // getevents itself must never appear: the observer must not disturb the
-  // thing it observes.
+  // getevents itself must never appear in the log.
   for (i = 0; i < n; i++)
     if (ev[i].type == EV_SYSCALL && ev[i].arg1 == SYS_getevents)
       failures++;

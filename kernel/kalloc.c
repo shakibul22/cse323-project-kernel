@@ -57,11 +57,8 @@ kfree(void *pa)
 
   r = (struct run *)pa;
 
-  // Black box: record OUTSIDE kmem.lock.  Two reasons: (1) it keeps the
-  // allocator's critical section as short as it was before, and (2) it
-  // avoids nesting elog.lock inside kmem.lock at all, so no lock-order
-  // question can even arise.  Disabled by default in EVMASK_DEFAULT
-  // because this path is far too hot for a 256-entry ring.
+  // Black box: outside kmem.lock, so elog.lock never nests inside it and
+  // the allocator's critical section stays as short as it was.
   eventcur(EV_FREE, PGSIZE, (uint64)pa);
 
   acquire(&kmem.lock);
@@ -87,7 +84,7 @@ kalloc(void)
   if (r)
     memset((char *)r, 5, PGSIZE); // fill with junk
 
-  // Black box: again outside kmem.lock, and only for successful allocations.
+  // Black box: outside kmem.lock, successful allocations only.
   if (r)
     eventcur(EV_ALLOC, PGSIZE, (uint64)r);
 
