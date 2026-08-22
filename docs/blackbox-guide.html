@@ -1,0 +1,259 @@
+<html><head><meta charset="utf-8"><title>xv6 Kernel Event Recorder - Simple Guide</title>
+<style>
+body { font-family: "Liberation Serif", serif; font-size: 11pt; color: #000; }
+h1 { font-family: "Liberation Sans", sans-serif; font-size: 20pt; color: #1a3d6d; margin-bottom: 2pt; }
+h2 { font-family: "Liberation Sans", sans-serif; font-size: 14pt; color: #1a3d6d;
+     border-bottom: 1px solid #9db4d0; padding-bottom: 3pt; margin-top: 18pt; }
+h3 { font-family: "Liberation Sans", sans-serif; font-size: 11.5pt; color: #24486f; margin-top: 12pt; margin-bottom: 3pt; }
+p  { margin-top: 4pt; margin-bottom: 4pt; line-height: 135%; }
+.sub { font-family: "Liberation Sans", sans-serif; font-size: 10pt; color: #55677d; margin-top: 0; }
+pre { font-family: "Liberation Mono", monospace; font-size: 8.5pt; background-color: #f2f5f9;
+      border: 1px solid #c8d5e3; padding: 7pt; margin-top: 5pt; margin-bottom: 5pt; }
+code { font-family: "Liberation Mono", monospace; font-size: 9.5pt; background-color: #eef2f7; }
+table { border-collapse: collapse; width: 100%; margin-top: 6pt; margin-bottom: 6pt; font-size: 9.5pt; }
+th { background-color: #1a3d6d; color: #ffffff; font-family: "Liberation Sans", sans-serif;
+     font-size: 9pt; text-align: left; padding: 5pt; }
+td { border-bottom: 1px solid #ccd6e2; padding: 5pt; vertical-align: top; }
+td.k { font-family: "Liberation Mono", monospace; font-size: 9pt; white-space: nowrap; }
+.note { background-color: #fff8e6; border: 1px solid #e3cf94; padding: 7pt; margin-top: 6pt; margin-bottom: 6pt; font-size: 10pt; }
+.step { background-color: #1a3d6d; color: #ffffff; font-family: "Liberation Sans", sans-serif;
+        font-weight: bold; padding: 2pt 6pt; font-size: 10pt; }
+</style></head><body>
+
+<h1>The xv6 Kernel Event Recorder</h1>
+<p class="sub">A "black box" flight recorder for the kernel &mdash; a step-by-step guide</p>
+
+<h2>1. What it is, in one paragraph</h2>
+<p>An aeroplane carries a black box that continuously records what the aircraft is doing.
+It holds only the last few hours: new data writes over the oldest. If something goes wrong,
+investigators read the box to see what happened just before.</p>
+<p>This project puts the same idea inside the xv6 kernel. Whenever something interesting
+happens &mdash; a process forks, exits, runs a program, makes a system call, gets scheduled,
+or a page of memory is allocated &mdash; the kernel writes one small fixed-size record into a
+buffer in its own memory. The buffer holds the most recent <b>256</b> events and overwrites
+the oldest ones. A user program called <code>blackbox</code> reads the buffer through a new
+system call and prints it as a readable table.</p>
+
+<h2>2. The whole design on one page</h2>
+<pre>
+   USER SPACE                          KERNEL SPACE
+   ----------                          ------------
+
+   $ blackbox                          fork()     -.
+        |                              exit()      |
+        | getevents(buf, 256)          exec()      |  each one calls
+        v                              syscall()   |  eventrecord()
+   +----------------+                  kalloc()    |
+   | system call 23 | ---------------> scheduler  -'
+   +----------------+                       |
+        ^                                   v
+        |                     +---------------------------+
+        |                     |  elog.buf[256]  (ring)    |
+        |    copyout()        |  [e][e][e][e][e][e][e]    |
+        +---------------------|          ^                |
+                              |         head              |
+                              |  guarded by elog.lock     |
+                              +---------------------------+
+                                    10 KB, never grows
+</pre>
+
+<h2>3. How it works, step by step</h2>
+
+<h3><span class="step">STEP 1</span> &nbsp; Something happens in the kernel</h3>
+<p>Seven places in the kernel were given one extra line of code. That line is the only
+change each of those files needed:</p>
+<table>
+<tr><th width="24%">Where</th><th width="30%">The line added</th><th>What it means</th></tr>
+<tr><td class="k">proc.c &mdash; kfork()</td><td class="k">eventrecord(EV_FORK, ...)</td><td>a new child process was created</td></tr>
+<tr><td class="k">proc.c &mdash; kexit()</td><td class="k">eventrecord(EV_EXIT, ...)</td><td>a process is finishing</td></tr>
+<tr><td class="k">proc.c &mdash; scheduler()</td><td class="k">eventrecord(EV_SCHED, ...)</td><td>a CPU picked a process to run</td></tr>
+<tr><td class="k">exec.c &mdash; kexec()</td><td class="k">eventrecord(EV_EXEC, ...)</td><td>a process loaded a new program</td></tr>
+<tr><td class="k">syscall.c &mdash; syscall()</td><td class="k">eventrecord(EV_SYSCALL, ...)</td><td>any system call was made</td></tr>
+<tr><td class="k">kalloc.c &mdash; kalloc()</td><td class="k">eventcur(EV_ALLOC, ...)</td><td>a page of memory was handed out</td></tr>
+<tr><td class="k">kalloc.c &mdash; kfree()</td><td class="k">eventcur(EV_FREE, ...)</td><td>a page of memory was returned</td></tr>
+</table>
+<p><b>Why this is the small way:</b> the syscall hook sits in the one dispatcher that every
+system call passes through. One line covers all 24 calls instead of editing 24 functions.</p>
+
+<h3><span class="step">STEP 2</span> &nbsp; eventrecord() writes one record</h3>
+<p>Every event is the same shape &mdash; 40 bytes, no strings, no pointers to anywhere else:</p>
+<pre>
+struct kernel_event {
+  uint64 seq;    // 0, 1, 2, 3, ... never repeats
+  uint64 arg1;   // meaning depends on the type
+  uint64 arg2;
+  uint   ticks;  // when: timer ticks since boot
+  int    pid;    // who: which process
+  int    cpu;    // where: which CPU core
+  int    type;   // what: FORK / EXIT / EXEC / SYSCALL / ...
+};
+</pre>
+<p>Filling this in is about a dozen stores to memory. There is no loop, no string formatting
+and no memory allocation, because this code runs on the kernel's hottest paths.</p>
+
+<h3><span class="step">STEP 3</span> &nbsp; The record goes into a circular buffer</h3>
+<p>The buffer is a plain fixed array of 256 records that exists for the whole life of the
+kernel. A variable <code>head</code> points at the next free slot. After each write:</p>
+<pre>
+head = (head + 1) &amp; 255;      // 255 = 256 - 1
+
+  before:  [ 12 ][ 13 ][ 14 ][ __ ][ __ ]      head = 3
+  write:   [ 12 ][ 13 ][ 14 ][ 15 ][ __ ]      head = 4
+  full:    [ 12 ][ 13 ][ 14 ][ 15 ][ 16 ]      head = 0  (wrapped)
+  next:    [ 17 ][ 13 ][ 14 ][ 15 ][ 16 ]      oldest overwritten
+</pre>
+<p><b>Why 256:</b> it is a power of two, so wrapping around is a bitwise AND instead of a
+division. Division is slow; AND is one instruction.</p>
+<p><b>Why a fixed array:</b> the recorder must never call <code>kalloc()</code>. If it did, and
+memory events were switched on, allocating space for an event would record an event, which
+would allocate space, which would record an event &mdash; infinite recursion. A fixed array
+cannot do that. It also means the recorder can never run out of memory or crash the kernel.</p>
+
+<h3><span class="step">STEP 4</span> &nbsp; One lock, and it is the smallest kind</h3>
+<p>Several CPUs can hit the recorder at the same moment, so the buffer is protected by a
+spinlock, <code>elog.lock</code>. It follows one strict rule:</p>
+<div class="note"><b>elog.lock is a leaf lock.</b> While holding it, the recorder never takes
+another lock, never allocates, never prints and never sleeps. A lock that never waits for
+another lock can never be half of a deadlock cycle. That single rule is what makes it safe
+to call the recorder from inside the scheduler, which is already holding a process lock.</div>
+
+<h3><span class="step">STEP 5</span> &nbsp; User space asks for the events</h3>
+<p>Two new system calls were added &mdash; numbers 23 and 24:</p>
+<table>
+<tr><th width="42%">System call</th><th>What it does</th></tr>
+<tr><td class="k">getevents(buf, max)</td><td>copies up to <i>max</i> events, oldest first, into your buffer; returns how many were copied, or -1 on a bad argument or address</td></tr>
+<tr><td class="k">eventctl(mask)</td><td>negative = ask which event types are being recorded; zero or more = record exactly these types and empty the buffer. Returns the previous setting</td></tr>
+</table>
+
+<h3><span class="step">STEP 6</span> &nbsp; The kernel copies out carefully</h3>
+<p>Events are copied 8 at a time onto the kernel stack, the lock is released, and only then
+are they written into user memory with <code>copyout()</code>.</p>
+<p><b>Why not just copy while holding the lock?</b> Writing to user memory can hit a page that
+is not present yet. Handling that fault calls <code>kalloc()</code>, which calls the recorder,
+which tries to take <code>elog.lock</code> &mdash; on the same CPU that already holds it. xv6
+spinlocks are not recursive, so the kernel would panic. Staging in small chunks avoids the
+whole problem.</p>
+
+<h3><span class="step">STEP 7</span> &nbsp; blackbox prints the table</h3>
+<p>The kernel stores only numbers. Turning event type <code>4</code> and argument <code>16</code>
+into the text <code>SYSCALL write</code> happens entirely in the user program.</p>
+<p><b>Why:</b> printing is slow and needs the console lock. Doing it in the kernel would mean
+the act of recording an event changed the timing of the thing being recorded. Keeping all
+formatting in user space keeps the kernel side down to a few stores.</p>
+
+<h2>4. What you actually see</h2>
+<p>Real output, captured after running <code>echo hi</code> at the shell. Read it top to
+bottom as a story: the shell (pid 2) reads your typing one character at a time, forks a
+child, the child gets scheduled on a CPU, and then execs the program.</p>
+<pre>
+$ blackbox -n 14
+
+===== XV6 KERNEL EVENT RECORDER =====
+
+   SEQ    TIME  CPU    PID  EVENT      DETAILS
+----------------------------------------------------------
+   156      47    0      2  SYSCALL    read          &lt;- shell reads your typing,
+   157      47    0      2  SYSCALL    read             one character per call
+     ...       (six more reads)
+   163      47    0      2  SYSCALL    fork          &lt;- shell asks for a child
+   164      47    0      2  FORK       child=5       &lt;- child is pid 5
+   165      47    0      2  SYSCALL    wait          &lt;- shell waits for it
+   166      47    0      5  SCHEDULE                 &lt;- CPU 0 runs pid 5
+   167      47    0      5  SYSCALL    sbrk
+   168      47    0      5  SYSCALL    exec
+   169      47    0      5  EXEC       blackbox      &lt;- pid 5 becomes blackbox
+----------------------------------------------------------
+Total events shown: 14 (seq 156..169)
+=====================================
+</pre>
+<table>
+<tr><th width="14%">Column</th><th>Meaning</th></tr>
+<tr><td class="k">SEQ</td><td>event number since boot. A jump in this column means older events were overwritten</td></tr>
+<tr><td class="k">TIME</td><td>timer ticks since boot</td></tr>
+<tr><td class="k">CPU</td><td>which core recorded it (this run had 3)</td></tr>
+<tr><td class="k">PID</td><td>which process the event is about</td></tr>
+<tr><td class="k">EVENT</td><td>one of FORK, EXIT, EXEC, SYSCALL, ALLOC, FREE, SCHEDULE</td></tr>
+</table>
+
+<h2>5. How to run it</h2>
+
+<h3>Build and boot</h3>
+<pre>
+cd xv6-blackbox
+make qemu
+</pre>
+<p>Wait for the <code>$</code> prompt. To leave qemu at any time press <b>Ctrl-A</b>, release,
+then press <b>x</b>.</p>
+
+<h3>Look at the log</h3>
+<pre>
+$ blackbox              # print everything in the buffer
+$ blackbox -n 20        # print only the 20 most recent events
+$ blackbox -s           # show which event types are being recorded
+$ blackbox -c           # empty the buffer
+</pre>
+
+<h3>Choose what gets recorded</h3>
+<pre>
+$ blackbox -m fork,exit         # only process creation and exit
+$ blackbox -m sched             # only scheduling decisions
+$ blackbox -m alloc,free        # watch physical memory (off by default)
+$ blackbox -m all               # everything
+$ blackbox -m default           # back to normal
+</pre>
+<div class="note"><b>Why ALLOC and FREE are off unless you ask:</b> the page allocator runs tens
+of thousands of times per second. Leaving it on would fill all 256 slots faster than a human
+can type the next command, and everything else would scroll away.</div>
+
+<h3>A demonstration worth trying</h3>
+<pre>
+$ blackbox -m fork,exit,exec    # narrow the recording, clears the buffer
+$ echo hello                    # do something ordinary
+$ blackbox                      # see exactly what the kernel did
+</pre>
+
+<h3>Run the tests</h3>
+<pre>
+$ eventtest             # all 8 tests
+$ eventtest 6           # just test 6
+</pre>
+<p>Expected last line: <code>=== ALL TESTS PASSED ===</code></p>
+<table>
+<tr><th width="12%">Test</th><th>Checks</th></tr>
+<tr><td class="k">1</td><td>events are recorded; timestamps and sequence numbers are sane</td></tr>
+<tr><td class="k">2, 3</td><td>fork and exit are recorded, with the right child pid and exit status</td></tr>
+<tr><td class="k">4</td><td>system calls are recorded &mdash; and getevents never records itself</td></tr>
+<tr><td class="k">5</td><td>scheduling events appear for more than one process</td></tr>
+<tr><td class="k">6</td><td>writing 512 events into a 256-slot buffer overwrites cleanly and does not crash</td></tr>
+<tr><td class="k">7</td><td>CPU numbers are valid with several cores running at once</td></tr>
+<tr><td class="k">8</td><td>an empty log, a zero count, a negative count and a bad pointer are all handled</td></tr>
+</table>
+
+<h2>6. Every file that was touched</h2>
+<table>
+<tr><th width="26%">File</th><th width="12%">Lines</th><th>Why</th></tr>
+<tr><td class="k">kernel/event.h</td><td>new</td><td>the record layout and event type constants, shared by both sides</td></tr>
+<tr><td class="k">kernel/event.c</td><td>new</td><td>the ring buffer, the lock, and the two system call bodies</td></tr>
+<tr><td class="k">user/blackbox.c</td><td>new</td><td>the viewer that formats and prints the log</td></tr>
+<tr><td class="k">user/eventtest.c</td><td>new</td><td>the 8-test suite</td></tr>
+<tr><td class="k">kernel/proc.c</td><td>3 lines</td><td>hooks in fork, exit and the scheduler</td></tr>
+<tr><td class="k">kernel/kalloc.c</td><td>2 lines</td><td>hooks in the page allocator</td></tr>
+<tr><td class="k">kernel/exec.c</td><td>1 line</td><td>hook in exec</td></tr>
+<tr><td class="k">kernel/syscall.c</td><td>1 line</td><td>one hook covering every system call</td></tr>
+<tr><td class="k">kernel/main.c</td><td>1 line</td><td>eventinit() at boot, after kinit()</td></tr>
+<tr><td class="k">kernel/sysproc.c</td><td>&mdash;</td><td>argument checking for the two new system calls</td></tr>
+<tr><td class="k">defs.h, syscall.h, user.h, usys.pl, Makefile</td><td>&mdash;</td><td>declaring and wiring up the new calls</td></tr>
+</table>
+
+<h2>7. The six ideas to remember</h2>
+<table>
+<tr><th width="34%">Decision</th><th>The reason in one line</th></tr>
+<tr><td>Fixed 256-slot array, never grows</td><td>the recorder can never allocate, so it can never recurse into itself or run out of memory</td></tr>
+<tr><td>Size is a power of two</td><td>wrapping is one AND instruction instead of a division</td></tr>
+<tr><td>elog.lock is a leaf lock</td><td>a lock that never waits for another lock cannot deadlock</td></tr>
+<tr><td>Never copy to user memory while holding the lock</td><td>a page fault during the copy would re-enter the recorder and panic</td></tr>
+<tr><td>All formatting in user space</td><td>keeps the kernel side to a few stores, so recording barely disturbs what it records</td></tr>
+<tr><td>getevents and eventctl are not traced</td><td>otherwise every read of the log would first write to it</td></tr>
+</table>
+
+</body></html>
