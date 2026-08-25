@@ -8,6 +8,7 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "defs.h"
+#include "event.h"
 
 void freerange(void *pa_start, void *pa_end);
 
@@ -56,6 +57,10 @@ kfree(void *pa)
 
   r = (struct run *)pa;
 
+  // Black box: outside kmem.lock, so elog.lock never nests inside it and
+  // the allocator's critical section stays as short as it was.
+  eventcur(EV_FREE, PGSIZE, (uint64)pa);
+
   acquire(&kmem.lock);
   r->next = kmem.freelist;
   kmem.freelist = r;
@@ -78,5 +83,10 @@ kalloc(void)
 
   if (r)
     memset((char *)r, 5, PGSIZE); // fill with junk
+
+  // Black box: outside kmem.lock, successful allocations only.
+  if (r)
+    eventcur(EV_ALLOC, PGSIZE, (uint64)r);
+
   return (void *)r;
 }

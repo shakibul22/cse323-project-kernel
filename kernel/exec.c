@@ -6,6 +6,7 @@
 #include "proc.h"
 #include "defs.h"
 #include "elf.h"
+#include "event.h"
 
 static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
 
@@ -128,6 +129,13 @@ kexec(char *path, char **argv)
     if (*s == '/')
       last = s + 1;
   safestrcpy(p->name, last, sizeof(p->name));
+
+  // Black box: p->name is a fixed 16-byte array, so packing it into
+  // arg1/arg2 is two aligned loads instead of string work on a hot path.
+  uint64 nm1, nm2;
+  memmove(&nm1, &p->name[0], sizeof(nm1));
+  memmove(&nm2, &p->name[8], sizeof(nm2));
+  eventrecord(EV_EXEC, p->pid, nm1, nm2);
 
   // Commit to the user image.
   oldpagetable = p->pagetable;

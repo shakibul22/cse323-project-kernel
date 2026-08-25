@@ -26,6 +26,13 @@ void            consputc(int);
 // exec.c
 int             kexec(char*, char**);
 
+// event.c
+void            eventinit(void);
+void            eventrecord(int, int, uint64, uint64);
+void            eventcur(int, uint64, uint64);
+int             eventread(uint64, int);
+int             eventctl(int);
+
 // file.c
 struct file*    filealloc(void);
 void            fileclose(struct file*);

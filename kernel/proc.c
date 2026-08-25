@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "event.h"
 
 struct cpu cpus[NCPU];
 
@@ -301,6 +302,9 @@ kfork(void)
   np->state = RUNNABLE;
   release(&np->lock);
 
+  // Black box: the child is runnable and we hold no locks.
+  eventrecord(EV_FORK, p->pid, pid, 0);
+
   return pid;
 }
 
@@ -329,6 +333,9 @@ kexit(int status)
 
   if (p == initproc)
     panic("init exiting");
+
+  // Black box: record before teardown, while p->pid is still valid.
+  eventrecord(EV_EXIT, p->pid, status, 0);
 
   // Close all open files.
   for (int fd = 0; fd < NOFILE; fd++) {
@@ -450,6 +457,14 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // Black box: record before swtch(), while this hart still owns
+        // p->lock so p cannot disappear.  Safe because elog.lock is a leaf
+        // lock, so p->lock -> elog.lock cannot form a cycle, and because
+        // acquire()/release() balance here, leaving noff back at 1 for
+        // sched()'s "sched locks" assertion.
+        eventrecord(EV_SCHED, p->pid, 0, 0);
+
         swtch(&c->context, &p->context);
 
         // Don't re-enable interrupts on release.

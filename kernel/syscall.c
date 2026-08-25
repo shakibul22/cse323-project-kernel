@@ -6,6 +6,7 @@
 #include "proc.h"
 #include "syscall.h"
 #include "defs.h"
+#include "event.h"
 
 // Fetch the uint64 at addr from the current process.
 int
@@ -103,6 +104,8 @@ extern uint64 sys_link(void);
 extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
 extern uint64 sys_sync(void);
+extern uint64 sys_getevents(void);
+extern uint64 sys_eventctl(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -130,8 +133,18 @@ static uint64 (*syscalls[])(void) = {
   [SYS_mkdir]   sys_mkdir,
   [SYS_close]   sys_close,
   [SYS_sync]    sys_sync,
+  [SYS_getevents] sys_getevents,
+  [SYS_eventctl]  sys_eventctl,
   // clang-format on
 };
+
+// Which system calls the black box records.  Bit n set => trace call n.
+// getpid/uptime are polled in tight loops, and tracing the recorder's own
+// calls would mean every read of the log first wrote to it -- the observer
+// would erase what it came to observe.
+#define SYSCALL_TRACE_MASK                                                    \
+  (~((1u << SYS_getpid) | (1u << SYS_uptime) | (1u << SYS_getevents) |        \
+     (1u << SYS_eventctl)))
 
 void
 syscall(void)
@@ -141,6 +154,11 @@ syscall(void)
 
   num = p->trapframe->a7;
   if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+    // Black box: one point covers every system call.  Recorded before the
+    // handler runs, so a call that never returns (exit) is still logged.
+    if (num < 32 && (SYSCALL_TRACE_MASK & (1u << num)))
+      eventrecord(EV_SYSCALL, p->pid, num, 0);
+
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0
     p->trapframe->a0 = syscalls[num]();
